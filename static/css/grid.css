@@ -214,3 +214,86 @@ body {
     border-top: 1px solid var(--line);
     font-weight: 600;
 }
+/* Header menus & filter popovers. Load after grid.css (render_index links it as /static/css/grid-menus.css).
+   Colors fall back to neutral values; map the --panel / --fg / --line vars to your grid.css palette.
+   Popovers are absolutely positioned inside .th, so .hrow and its scroll ancestors must not clip (no overflow:hidden). */
+
+.th {
+    position: relative;
+}
+.th[data-sortable="1"] .title {
+    cursor: pointer;
+    user-select: none;
+}
+
+.pop {
+    position: absolute;
+    top: calc(100% + 4px);
+    z-index: 30;
+    min-width: 190px;
+    padding: 4px;
+    background: var(--panel, #fff);
+    color: var(--fg, #1d2430);
+    border: 1px solid var(--line, #d5dbe3);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgb(0 0 0 / 0.16);
+    font-weight: 400;
+    text-align: left;
+}
+.th.right .pop {
+    right: 0;
+}
+.th:not(.right) .pop {
+    right: 0;
+}
+
+/* data-show toggles an inline display:none; when shown, this rule decides the layout */
+.pop.filter {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.pop button,
+.foot .link {
+    font: inherit;
+    color: var(--text);
+    background: none;
+    border: 0;
+    cursor: pointer;
+}
+.pop button {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 5px;
+    text-align: left;
+.pop.filter button {
+    width: auto;
+    flex: none;
+}
+.pop button:hover {
+    background: rgb(127 127 127 / 0.16);
+}
+
+.pop input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    font: inherit;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--line, #d5dbe3);
+    border-radius: 5px;
+}
+.pop input:focus-visible,
+.pop button:focus-visible,
+.foot .link:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 1px;
+}
+
+.foot .link {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}

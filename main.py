@@ -1,16 +1,33 @@
-"""Portfolio grid: state -> HTML, streamed to Datastar.  No JS, no JSON.  Styling lives in grid.css.
+"""Portfolio grid: state -> HTML, streamed to Datastar.  No client JS: HTML goes down, signals go up.
+Styling lives in grid.css (+ grid-menus.css for the header menus).
+
+CQRS
+    query     GET  /stream     one SSE connection per tab; wakes on every state change -> rd.patch(render_grid(state))
+    commands  POST /sort /filter /hide /show-all
+                               read the Datastar signals, call ONE state function, answer rd.empty().
+                               The state function calls hub.publish(); the stream does all the rendering.
 
         state = new_state()
-        asyncio.create_task(run_ticks(state))     # moving values every TICK_SECONDS
+        ensure_ticking(state)                     # moving values every TICK_SECONDS
 
         q = hub.subscribe()                       # one queue per /stream connection
         await q.get()                             # wakes on every state change -> render_grid(state)
+
+Signals (declared once on <body>, see render_index):
+    _open    which popover is open: '' | 'menu:<col>' | 'filter:<col>'.  Leading underscore = never sent to the server.
+    col      argument of every command: the column it applies to
+    dir      argument of /sort: toggle | asc | desc | none
+    filters  {column: text}, two-way bound to the filter inputs
+
+The grid is re-rendered 5x per second, so popovers carry data-ignore-morph: data-show owns their visibility and
+the filter <input> keeps its focus and text.  Everything else in the grid is plain server-rendered HTML.
 
 Every function that changes state (tick, set_sort, set_filter, ...) calls hub.publish().
 Cells whose *shown* value changed on the last tick carry flash-up / flash-down classes.
 """
 
 import asyncio
+import json
 import random
 import string
 from html import escape
@@ -406,22 +423,104 @@ ICON_MENU = (
 )
 
 
+# ── Datastar attribute helpers: the only place that knows the wire syntax ──
+CLOSE = "$_open = ''; "  # prefix for anything that should also close the open popover
+
+
+def attr(name, expr):
+    """' data-on:click="..."' - the expression is HTML-escaped; Datastar sees the original text."""
+    return f' {name}="{esc(expr)}"'
+
+
+def cmd(url, **args):
+    """Expression for data-on:click: set the command's arguments (signals), then POST.
+    Datastar serialises the signals when @post runs, so the server sees the values set just before it."""
+    sets = "".join(f"${k} = '{v}'; " for k, v in args.items())
+    return f"{sets}@post('{url}')"
+
+
+def toggle(key):
+    """Open popover `key`, or close it if it is already the open one."""
+    return f"$_open = $_open === '{key}' ? '' : '{key}'"
+
+
+def pop(key, cls, body):
+    """Popover. data-show owns visibility (signal $_open); data-ignore-morph keeps the 5 Hz patches off it,
+    so it neither flickers shut nor loses the text being typed."""
+    pid = "pop-" + key.replace(":", "-")
+    shown = attr("data-show", f"$_open === '{key}'")
+    return (
+        f'<div class="pop {cls}" id="{pid}" style="display:none" data-ignore-morph{shown}>'
+        f"{body}</div>"
+    )
+
+
+def render_filter_pop(name, hint):
+    key = f"filter:{name}"
+    focus = attr(
+        "data-effect", f"$_open === '{key}' && requestAnimationFrame(() => el.focus())"
+    )
+    enter = attr("data-on:keydown", "evt.key === 'Enter' && ($_open = '')")
+    send = attr("data-on:input__debounce.250ms", cmd("/filter", col=name))
+    clear = attr("data-on:click", f"$filters.{name} = ''; " + cmd("/filter", col=name))
+    body = (
+        f'<input type="text" placeholder="{esc(hint)}" autocomplete="off" data-bind="filters.{name}"'
+        f"{send}{enter}{focus}>"
+        f'<button type="button" class="clear"{clear}>Clear</button>'
+    )
+    return pop(key, "filter", body)
+
+
+def render_menu_pop(name):
+    c = COLUMNS[name]
+    items = []
+    if c["sortable"]:
+        items += [
+            ("Sort ascending", cmd("/sort", col=name, dir="asc")),
+            ("Sort descending", cmd("/sort", col=name, dir="desc")),
+            ("Clear sort", cmd("/sort", col=name, dir="none")),
+        ]
+    # hiding a column also drops its server-side filter, so reset the bound input to match
+    forget = f"$filters.{name} = ''; " if c["filterable"] else ""
+    items.append(("Hide column", forget + cmd("/hide", col=name)))
+    body = "".join(
+        f'<button type="button"{attr("data-on:click", CLOSE + expr)}>{label}</button>'
+        for label, expr in items
+    )
+    return pop(f"menu:{name}", "menu", body)
+
+
 def render_th(state, name):
     c = COLUMNS[name]
     mark = ""
     if state["sort_column"] == name:
         mark = f'<span class="sort">{"▼" if state["sort_desc"] else "▲"}</span>'
-    filt = ""
+    sort_on = (
+        attr("data-on:click", cmd("/sort", col=name, dir="toggle"))
+        if c["sortable"]
+        else ""
+    )
+    parts = [f'<span class="title"{sort_on}>{esc(c["title"])}{mark}</span>']
     if c["filterable"]:
         on = " on" if name in state["filters"] else ""
-        filt = (
-            f'<button type="button" class="icon{on}" data-action="filter" title="Filter" '
-            f'data-hint="{esc(c["hint"])}" data-value="{esc(state["filters"].get(name, ""))}">{ICON_FILTER}</button>'
+        open_filter = attr("data-on:click", toggle(f"filter:{name}"))
+        parts.append(
+            f'<button type="button" class="icon{on}" title="Filter"{open_filter}>{ICON_FILTER}</button>'
+            + render_filter_pop(name, c["hint"])
         )
-    menu = f'<button type="button" class="icon" data-action="menu" title="Column menu">{ICON_MENU}</button>'
+    open_menu = attr("data-on:click", toggle(f"menu:{name}"))
+    parts.append(
+        f'<button type="button" class="icon" title="Column menu"{open_menu}>{ICON_MENU}</button>'
+        + render_menu_pop(name)
+    )
+    # a click anywhere outside this header cell closes *its* popover (and only its own: the guard
+    # keeps it from undoing a popover that another header's button just opened)
+    away = attr(
+        "data-on:click__outside", f"$_open.endsWith(':{name}') && ($_open = '')"
+    )
     return (
-        f'<div class="th {c["align"]}" role="columnheader" data-column="{name}" data-sortable="{int(c["sortable"])}">'
-        f'<span class="title" data-action="sort">{esc(c["title"])}{mark}</span>{filt}{menu}</div>'
+        f'<div class="th {c["align"]}" id="th-{name}" role="columnheader" data-column="{name}" '
+        f'data-sortable="{int(c["sortable"])}"{away}>' + "".join(parts) + "</div>"
     )
 
 
@@ -458,34 +557,56 @@ def render_grid(state):
         for r in rows
     )
     widths = " ".join(COLUMNS[n]["width"] for n in cols)
+    hidden = len(state["hidden_columns"])
+    restore = ""
+    if hidden:
+        label = f"Show {hidden} hidden column{'s' if hidden > 1 else ''}"
+        restore = f'<button type="button" class="link"{attr("data-on:click", cmd("/show-all"))}>{label}</button>'
     return (
         '<main id="grid">'
         f'<div class="inner" style="--cols:{widths}">'
         f'<div class="hrow" role="row">{head}</div><div class="rows">{body}</div>'
-        f'<div class="foot"><span>Rows: {len(rows)}</span><span>Total Rows: {len(state["rows"])}</span></div></div>'
+        f'<div class="foot"><span>Rows: {len(rows)}</span>{restore}<span>Total Rows: {len(state["rows"])}</span></div></div>'
         "</main>"
     )
 
 
-INDEX = """
-<!doctype html>
+def render_index(state):
+    """The page shell. Signals and the stream live on <body>, which is never patched, so they survive
+    every re-render of #grid.  The filter signals are seeded from the server state (a reload keeps them in sync)."""
+    seed = {
+        "_open": "",
+        "col": "",
+        "dir": "",
+        "filters": {
+            n: state["filters"].get(n, "")
+            for n, c in COLUMNS.items()
+            if c["filterable"]
+        },
+    }
+    esc_key = attr("data-on:keydown__window", "evt.key === 'Escape' && ($_open = '')")
+    return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script type="module" src="/static/js/datastar-rocket.js"></script>
-<title>Portfolio</title><link rel="stylesheet" href="/static/css/grid.css"></head>
-<body><main id="grid" data-init="@get('/stream')"></main></body>
+<title>Portfolio</title><link rel="stylesheet" href="/static/css/grid.css">
+<body data-signals="{esc(json.dumps(seed))}" data-init="@get('/stream')"{esc_key}>
+<main id="grid"></main>
+</body>
 </html>
 """
 
 
+# ───────────────────────────── routes ─────────────────────────────
 state = new_state()
 
 
 @rd.get("/")
 async def index(request):
-    return rd.html(INDEX)
+    return rd.html(render_index(state))
 
 
+# query side: render only, never mutate
 @rd.get("/stream")
 async def stream(request):
     ensure_ticking(state)  # i have to add a startup lifecycle to rd
@@ -497,6 +618,43 @@ async def stream(request):
             yield rd.patch(render_grid(state))
     finally:
         hub.unsubscribe(q)
+
+
+# command side: mutate through ONE state function (it publishes to the hub), never render
+@rd.post("/sort")
+async def cmd_sort(request):
+    s = request.signals
+    column, how = s["col"], s["dir"]
+    if how == "toggle":
+        toggle_sort(state, column)
+    elif how in ("asc", "desc"):
+        set_sort(state, column, how == "desc")
+    elif how == "none" and state["sort_column"] == column:
+        clear_sort(
+            state
+        )  # "Clear sort" in a column's menu only clears *that* column's sort
+    return rd.empty()
+
+
+@rd.post("/filter")
+async def cmd_filter(request):
+    s = request.signals
+    column = s["col"]
+    set_filter(state, column, s["filters"].get(column, ""))
+    return rd.empty()
+
+
+@rd.post("/hide")
+async def cmd_hide(request):
+    s = request.signals
+    hide_column(state, s["col"])
+    return rd.empty()
+
+
+@rd.post("/show-all")
+async def cmd_show_all(request):
+    show_all_columns(state)
+    return rd.empty()
 
 
 rd.run(reload=True)
