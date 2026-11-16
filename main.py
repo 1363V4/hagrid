@@ -34,7 +34,7 @@ from html import escape
 
 import rd
 
-TICK_SECONDS = 0.2
+TICK_SECONDS = 0.5
 TOTAL_ROWS = 134
 BARS, SPARK_W, SPARK_H = 27, 274, 62  # timeline sparkline geometry
 PITCH, BAR_W = SPARK_W / BARS, 7
@@ -586,10 +586,16 @@ def render_index(state):
     }
     esc_key = attr("data-on:keydown__window", "evt.key === 'Escape' && ($_open = '')")
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="en">
+<head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script type="module" src="/static/js/datastar-rocket.js"></script>
 <title>Portfolio</title><link rel="stylesheet" href="/static/css/grid.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,100..700;1,100..700&display=swap" rel="stylesheet">
+</head>
 <body data-signals="{esc(json.dumps(seed))}" data-init="@get('/stream')"{esc_key}>
 <main id="grid"></main>
 </body>
