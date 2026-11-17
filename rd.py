@@ -1,6 +1,6 @@
 # Red Dwarf
 # ---------
-# Version: 1.0.1
+# Version: 1.1.1
 # Author: Louis Sunshine
 # Permalink: https://github.com/1363V4/red-dwarf
 # Website: https://red.leg.ovh/
@@ -32,10 +32,10 @@ import time
 from collections import namedtuple
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
-from html import escape
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from pathlib import Path
+from typing import final
 from urllib.parse import parse_qs, unquote
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,8 @@ async def _read_request(reader):
         if _FORBIDDEN.search(path):
             raise ValueError
         query = parse_qs(qs)
-        logger.info("Received %s request on %s", method, escape(path))  # telemetry ftw
+        # logging uses cpu. i'll disable it for now
+        # logger.info("Received %s request on %s", method, escape(path))
 
         headers = {}
         while (header_line := await reader.readline()) != b"\r\n":
@@ -255,7 +256,7 @@ _NOT_FOUND = _plain_response(HTTPStatus.NOT_FOUND)
 _SERVER_ERROR = _plain_response(HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
-async def _write_response(writer, response, connection=None):
+async def _write_response(writer, response, keep_alive=False):
     body = (
         response.body.encode("utf-8")
         if isinstance(response.body, str)
@@ -263,12 +264,15 @@ async def _write_response(writer, response, connection=None):
     )
     header_buffer = [
         f"HTTP/1.1 {response.status.value} {response.status.phrase}",
-        f"Content-Length: {len(response.body)}",
+        f"Content-Length: {len(body)}",
     ]
     if response.content_type:
         header_buffer += [f"Content-Type: {response.content_type}"]
-    if connection:
-        header_buffer += [f"Connection: {connection}"]
+    if keep_alive:
+        header_buffer += ["Connection: keep-alive"]
+        header_buffer += [f"Keep-Alive: timeout={REQUEST_TIMEOUT - 1}"]
+    else:
+        header_buffer += ["Connection: close"]
     for header, value in response.headers.items():
         header_buffer += [f"{header}: {value}"]
     for cookie in response.cookies:
@@ -354,7 +358,9 @@ async def _handle(reader, writer):
         for _ in range(MAX_REQUESTS_PER_CONNECTION):
             try:
                 request = await _read_request(reader)
-            except ValueError, TimeoutError:
+            except TimeoutError:
+                return
+            except ValueError:
                 await _write_response(writer, _BAD_REQUEST)
                 return
             if request is None:
@@ -381,8 +387,9 @@ async def _handle(reader, writer):
                             return
                         response = await result
 
-            connection = _should_keep_alive(request)
-            await _write_response(writer, response, connection=connection)
+            await _write_response(
+                writer, response, keep_alive=_should_keep_alive(request)
+            )
 
     except ConnectionError:  # client left
         return
@@ -415,6 +422,32 @@ async def _serve(host, port, sock):
         logger.info(f"Listening on http://{host}:{port}")
 
     await server.serve_forever()
+
+
+# LIFECYCLE
+
+_before_startup = []
+_after_shutdown = []
+
+
+def before_startup(fn):
+    _before_startup.append(fn)
+    return fn
+
+
+def after_shutdown(fn):
+    _after_shutdown.append(fn)
+    return fn
+
+
+async def _serve_with_lifecycle(host, port, sock):
+    try:
+        for fn in _before_startup:
+            await fn()
+        await _serve(host, port, sock)
+    finally:
+        for fn in reversed(_after_shutdown):
+            await fn()
 
 
 # MAIN
@@ -465,11 +498,11 @@ def run(host="127.0.0.1", port=8080, sock=None, reload=False):
     is_child = bool(os.environ.get(_CHILD_ENV))
 
     if not is_child:
-        logger.info("Hello and welcome!")
-        logger.info("Thank you for using Red Dwarf.")
+        logger.info("Hello there!")
+        logger.info("Thank you for using Red Dwarf <3")
         logger.info("Here are some recommendations to start:")
         logger.info("1. Read the Tao of Datastar")
-        logger.info("2. Remember to escape user input")
+        logger.info("2. Escape user input")
         logger.info("3. ???")
         logger.info("4. Profit!")
 
@@ -478,4 +511,5 @@ def run(host="127.0.0.1", port=8080, sock=None, reload=False):
             _run_with_reload()
     else:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
-        asyncio.run(_serve(host, port, sock))
+        asyncio.run(_serve_with_lifecycle(host, port, sock))
+    logger.info("Red Dwarf out.")

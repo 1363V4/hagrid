@@ -12,3 +12,4 @@ virtual scroll (ag grid does that)
 2. oneshot
 3. backend and the filter problem
 4. perf
+5. accessibility
